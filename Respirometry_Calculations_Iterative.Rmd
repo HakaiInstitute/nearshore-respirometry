@@ -1,0 +1,463 @@
+---
+title: "Respirometry Calculations"
+subtitle: "Quadra Island British Columbia 2019"
+author: "Nathan Spindel"
+output:
+  pdf_document: default
+  html_document:
+    keep_md: yes
+editor_options:
+  chunk_output_type: console
+---
+## Workflow:
+1) Import data, check for common errors, plot for visual inspection, store as object.  
+2) Analyze object to estimate desired rate parameter.  
+3) Generate diagnostic plots.  
+4) Adjust data based on background respiration.  
+5) Convert rate to volume or mass-specific rate.
+
+See Harianto, Carey, and Byrne 2019^[1	Harianto, J., Carey, N. & Byrne, M. respR-An R package for the manipulation and analysis of respirometry data. Methods in Ecology and Evolution 0, doi:10.1111/2041-210x.13162 (2019).] for documentation on **respR** package.
+# Load packages and utility functions
+```{r include=FALSE}
+# Set working directory:
+# setwd('C:/Users/nates/OneDrive/Documents/Respirometry/2019_Quadra')
+working_directory <- file.path('G:', 'My Drive', 'Quadra')
+setwd(working_directory)
+# Load packages:
+library(tidyverse)
+library(readxl)
+library(lubridate)
+library(respirometry)
+library(respR)
+library(progress)
+library(ggthemes)
+# Store file path prefix for convenience.
+# prefix <- "C:/Users/nates/OneDrive/Documents/Respirometry/2019_Quadra/Data/"
+prefix <- paste0(working_directory, "/5_Data/Presens_Respirometry_Files/")
+```
+
+```{r}
+calc_metabolic_rate <- function(sample.id, metric) {
+  sample.id = i
+  # Subset biometric data for just the focal individual
+  mass.data <- biometrics %>%
+    filter(sample_id == sample.id)
+  # Get the label for the focal individual
+  sample.label <- mass.data$label
+  # Create a string for the filename of the respiration data for the focal individual
+  suffix <- paste(sample.label, ".xlsx", sep = "", collapse = NULL)
+  respiration.file = paste(prefix, suffix, sep = "", collapse = NULL)
+  # Create a string for the filename of the background respiration data associated with the focal individual
+  background.row <- biometrics %>%
+    filter(
+      date == mass.data$date
+      &
+        species == mass.data$species
+      &
+        is_background == 'Y'
+      &
+        site == mass.data$site
+      &
+        trial_no == mass.data$trial_no
+      &
+        habitat == mass.data$habitat
+      &
+        chamber_vol_ml == mass.data$chamber_vol_ml
+    )
+  background.label <- background.row$label
+  suffix.background <- paste(background.label, ".xlsx", sep = "", collapse = NULL)
+  background.file = paste(prefix, suffix.background, sep = "", collapse = NULL)
+  
+  whole.dry <- mass.data$gonad_dry_mass_g + mass.data$animal_dry_mass_g
+  # Ash-free dry weight of single gonad in grams.
+  single.gonad.afdw <- mass.data$gonad_dry_mass_g - mass.data$gonad_ash_free_dry_wt_g
+  # Ash-free dry weight in grams of all 5 gonads combined.
+  cumulative.gonad.afdw <- single.gonad.afdw * 5
+  # Ash-free dry weight in grams: whole animal dry mass - whole animal afdw + single gonad afdw
+  whole.afdw <- mass.data$animal_dry_mass_g - mass.data$animal_ash_free_dry_wt_g - single.gonad.afdw
+  # Total volume of chamber in liters
+  chamber.volume <- mass.data$chamber_vol_ml / 1000 
+  # Calculate volume of individual in liters assuming oblate spheroid geometry.
+  if (is.na(mass.data$test_diam_mm_tissue_sampling)) {
+    test.diam = mass.data$test_diam_mm
+    test.ht = mass.data$test_ht_mm
+  } else {
+    test.diam = mass.data$test_diam_mm_tissue_sampling
+    test.ht = mass.data$test_ht_mm_tissue_sampling
+  }
+  
+  semi.major.axis.mm <- 0.5 * test.diam
+  semi.minor.axis.mm <- 0.5 * test.ht
+  spheroid.volume.ml <- (4/3 * pi * semi.major.axis.mm ^2 * semi.minor.axis.mm)/1000 # # Equation for volume of oblate spheroid = 4/3pia^2c in mL
+  # Store volume of individual based on displacement volume.
+  displacement.volume.ml <- mass.data$displacement_vol_ml
+  # Get volume of specimen. Choose the measured displacement volume if it exists, otherwise use the volume calculated
+  # based on oblate spheroid geometry:
+  if (is.na(mass.data$displacement_vol_ml)) {
+    specimen.volume <<- spheroid.volume.ml
+  } else {
+    specimen.volume <<- mass.data$displacement_vol_ml
+  }
+  # # Ash-free dry weight of single gonad in grams.
+  # single.gonad.afdw <- mass.data$gonad_dry_mass_g - mass.data$gonad_ash_free_dry_wt_g
+  # # Ash-free dry weight in grams of all 5 gonads combined.
+  # cumulative.gonad.afdw <- single.gonad.afdw * 5
+  # # Ash-free dry weight in grams: whole animal dry mass - whole animal afdw + single gonad afdw
+  # whole.afdw <- mass.data$animal_dry_mass_g - mass.data$animal_ash_free_dry_wt_g + single.gonad.afdw
+  # # Total volume of chamber in liters
+  # chamber.volume <- mass.data$chamber_vol_ml / 1000 
+  # # Calculate volume of individual assuming oblate spheroid geometry.
+  # semi.major.axis.mm <- 0.5 * mass.data$test_diam_mm_tissue_sampling
+  # semi.minor.axis.mm <- 0.5 * mass.data$test_ht_mm_tissue_sampling
+  # spheroid.volume.ml <- (4/3 * pi * semi.major.axis.mm ^2 * semi.minor.axis.mm)/1000 # # Equation for volume of oblate spheroid = 4/3pia^2c in mL
+  # # Store volume of individual based on displacement volume.
+  # displacement.volume.ml <- mass.data$displacement_vol_ml
+  
+  # Get background microbial respiration background data:
+  background <- read_excel(path = background.file, sheet = "SADD0002000036, Ch 2")
+  
+  # Import and inspect
+  background.inspected <- inspect(background, time = 1, oxygen = 7) # In PreSens default output, the oxygen measurement is in the 7th column
+  # Determine optimal linear segment (see respR::auto_rate) 
+  background.rate <- auto_rate(background.inspected)
+  # Get the start time point for the optimal linear segment of the background signal
+  optimal.start <- background.rate$summary$time[1]
+  # Get the end time point for the optimal linear segment of the background signal
+  optimal.end <- background.rate$summary$endtime[1]
+  # Use subset determined using respR::auto_rate to calculate background rate of change in oxygen concentration
+  bg <- calc_rate.bg(background, xcol = 1, ycol = 7, from = optimal.start, to = optimal.end, by = "time")
+  
+  urchin <- read_excel(path = respiration.file, sheet = 6) # sheet 6 contains the oxygen measurement data
+  
+  # Import and inspect
+  urchin.inspected <- inspect(urchin, time = 1, oxygen = 7) # In PreSens default output, the oxygen measurement is in the 7th column
+  # Determine optimal linear segment (see respR::auto_rate) 
+  urchin.rate <- auto_rate(urchin.inspected)
+  
+  # Adjust rate
+  adj.urchin.rate <- adjust_rate(urchin.rate, bg)
+  
+  # See respR::convert_rate
+  # convert_rate(x, o2.unit = NULL, time.unit = NULL, output.unit = NULL,
+  #   volume = NULL, mass = NULL, S = NULL, t = NULL, P = NULL)
+  # Note: A string-matching algorithm is used to identify units. 
+  # E.g. all of these are the same: mg/L; mg/l, mg L-1, mgL-1, mg per litre, mg.l-1, mg.L-1
+  # 
+  # O2 Units - Do not require t, S and P
+  # [1] "mg/L"   "ug/L"   "mmol/L" "umol/L"
+  # 
+  # O2 Units - Require t, S and P
+  #  [1] "mL/L"    "mg/kg"   "ug/kg"   "mmol/kg" "umol/kg" "mL/kg"   "%"       "Torr"    "hPa"     "kPa"     "mmHg"    "inHg"   
+  # 
+  # Time units
+  # [1] "s" "m" "h"
+  # 
+  # Output mass units
+  # [1] "ug" "mg" "g"  "kg"
+  urchin_MO2 <- convert_rate(adj.urchin.rate,
+                             o2.unit = "mg/l", # dissolved oxygen unit used to determine rate
+                             time.unit = "s", # time unit of the data used to determine rate
+                             output.unit = "mg/m/kg", 
+                             volume = chamber.volume - specimen.volume, # total volume of chamber in liters excluding the specimen volume
+                             mass = metric) # mass of sample in kg. (e.g. ash-free dry weight, dry weight, etc).
+  # Store metabolic rate data for focal individual in data frame.
+  sample.result <- tibble(
+    sample_id = mass.data$sample_id, 
+    date = mass.data$date,
+    label = mass.data$label,
+    species = mass.data$species,
+    habitat = mass.data$habitat,
+    site = mass.data$site,
+    displacement_volume_ml = mass.data$displacement_vol_ml,
+    spheroid_volume_ml = spheroid.volume.ml,
+    whole_ash_free_dry_wt_g = whole.afdw,
+    cumulative_gonad_ash_free_dry_wt_g = cumulative.gonad.afdw,
+    single_gonad_ash_free_dry_wt_g = single.gonad.afdw,
+    whole_dry_wt_g = whole.dry,
+    cumulative_gonad_dry_wt_g = mass.data$gonad_dry_mass_g * 5,
+    single_gonad_dry_wt_g = mass.data$gonad_dry_mass_g,
+    input_rate = urchin_MO2$summary$input.rate[1],
+    converted_rate = urchin_MO2$summary$converted.rate[1],
+    volumetric_rate = urchin_MO2$summary$volumetric[1],
+    mass_specific_rate = urchin_MO2$summary$mass.specific[1],
+    rate_unit = urchin_MO2$output.unit,
+    respiration_filename = respiration.file
+  )
+  
+  if (!is_null(sample.result)) {
+    return(sample.result)
+  } else {
+    print(paste0("No result calculated for sample id: ", sample.id))
+  }
+}
+```
+
+
+# Get general biometric data.
+```{r}
+# Get full set of biometric data.
+biometrics <- read_excel(
+  # path = "C:/Users/nates/OneDrive/Documents/Respirometry/2019_Quadra/Data/Urchin_Biometrics/Urchin_Biometrics.xlsx", 
+  path = paste(working_directory, "2019_Haida_Gwaii/Data/Urchin_Biometrics/Urchin_Biometrics.xlsx", sep = "/"),
+  sheet = "data")
+```
+# Unique identifier for the focal individual.
+```{r}
+sample.id = 3
+```
+# Gather quirks:
+```{r}
+# Store sample.id's that are problematic for later troubleshooting
+# Whole animal ash-free dry weight quirks:
+quirks = c()
+```
+# Get sample id's for non-background samples.
+```{r}
+# Get the sample id's which are not background samples and not included in the list of quirks.
+# Probable cause: chosen normalization metric not available for focal individual (i.e. must select alternative
+# normalization metric).
+not.background <- biometrics %>%
+  filter(is_background == "N" & !sample_id %in% quirks) %>%
+  select(sample_id)
+```
+# Get biometric data for focal individual.
+```{r collapse=TRUE, tidy=TRUE}
+# Subset biometric data for just the focal individual
+mass.data <- biometrics %>%
+ filter(sample_id == sample.id)
+# Get the label for the focal individual
+sample.label <- mass.data$label
+# Create a string for the filename of the respiration data for the focal individual
+suffix <- paste(sample.label, ".xlsx", sep = "", collapse = NULL)
+respiration.file = paste(prefix, suffix, sep = "", collapse = NULL)
+# Create a string for the filename of the background respiration data associated with the focal individual
+background.row <- biometrics %>%
+  filter(
+    date == mass.data$date
+    &
+    species == mass.data$species
+    &
+    is_background == 'Y'
+    &
+    site == mass.data$site
+    &
+    trial_no == mass.data$trial_no
+    &
+    habitat == mass.data$habitat
+    &
+    chamber_vol_ml == mass.data$chamber_vol_ml
+  )
+background.label <- background.row$label
+suffix.background <- paste(background.label, ".xlsx", sep = "", collapse = NULL)
+background.file = paste(prefix, suffix.background, sep = "", collapse = NULL)
+```
+Get biometric data to be used for normalizing oxygen consumption rate.
+```{r collapse=TRUE, tidy=TRUE}
+whole.dry <- mass.data$gonad_dry_mass_g + mass.data$animal_dry_mass_g
+# Ash-free dry weight of single gonad in grams.
+single.gonad.afdw <- mass.data$gonad_dry_mass_g - mass.data$gonad_ash_free_dry_wt_g
+# Ash-free dry weight in grams of all 5 gonads combined.
+cumulative.gonad.afdw <- single.gonad.afdw * 5
+# Ash-free dry weight in grams: whole animal dry mass - whole animal afdw + single gonad afdw
+whole.afdw <- mass.data$animal_dry_mass_g - mass.data$animal_ash_free_dry_wt_g - single.gonad.afdw
+# Total volume of chamber in liters
+chamber.volume <- mass.data$chamber_vol_ml / 1000 
+# Calculate volume of individual in liters assuming oblate spheroid geometry.
+if (is.na(mass.data$test_diam_mm_tissue_sampling)) {
+  test.diam = mass.data$test_diam_mm
+  test.ht = mass.data$test_ht_mm
+} else {
+  test.diam = mass.data$test_diam_mm_tissue_sampling
+  test.ht = mass.data$test_ht_mm_tissue_sampling
+}
+
+semi.major.axis.mm <- 0.5 * test.diam
+semi.minor.axis.mm <- 0.5 * test.ht
+spheroid.volume.ml <- (4/3 * pi * semi.major.axis.mm ^2 * semi.minor.axis.mm)/1000 # # Equation for volume of oblate spheroid = 4/3pia^2c in mL
+# Store volume of individual based on displacement volume.
+displacement.volume.ml <- mass.data$displacement_vol_ml
+# Get volume of specimen. Choose the measured displacement volume if it exists, otherwise use the volume calculated
+# based on oblate spheroid geometry:
+if (is.na(mass.data$displacement_vol_ml)) {
+  specimen.volume <<- spheroid.volume.ml
+} else {
+  specimen.volume <<- mass.data$displacement_vol_ml
+}
+```
+Get background data.
+```{r collapse=TRUE}
+# Get background microbial respiration background data:
+# background <- read_excel(path = background.file, sheet = "SADD0002000036, Ch 2")
+background <- read_excel(path = background.file, sheet = "SADD0002000036, Ch 1")
+```
+Select linear segment of background data, calculate rate of change in oxygen concentration.
+```{r}
+# Import and inspect
+background.inspected <- inspect(background, time = 1, oxygen = 7) # In PreSens default output, the oxygen measurement is in the 7th column
+# Determine optimal linear segment (see respR::auto_rate) 
+background.rate <- auto_rate(background.inspected)
+# Get the start time point for the optimal linear segment of the background signal
+optimal.start <- background.rate$summary$time[1]
+# Get the end time point for the optimal linear segment of the background signal
+optimal.end <- background.rate$summary$endtime[1]
+# Use subset determined using respR::auto_rate to calculate background rate of change in oxygen concentration
+bg <- calc_rate.bg(background, xcol = 1, ycol = 7, from = optimal.start, to = optimal.end, by = "time")
+```
+Get focal organism respiration data.
+```{r}
+urchin <- read_excel(path = respiration.file, sheet = 6) # sheet 6 contains the oxygen measurement data
+```
+Select linear segment of focal organism data, calculate rate of change in oxygen concentration.
+```{r}
+# Import and inspect
+urchin.inspected <- inspect(urchin, time = 1, oxygen = 7) # In PreSens default output, the oxygen measurement is in the 7th column
+# Determine optimal linear segment (see respR::auto_rate) 
+urchin.rate <- auto_rate(urchin.inspected)
+```
+Adjust rate calculation to account for background change in oxygen concentration.
+```{r}
+# Adjust rate
+adj.urchin.rate <- adjust_rate(urchin.rate, bg)
+```
+# Set Metric (e.g. ash-free dry weight, wet weight, etc) for mass normalization of respiration rate.
+```{r}
+# metric <<- single.gonad.afdw
+# metric <<- cumulative.gonad.afdw
+metric <<- whole.afdw
+# metric <<- whole.dry
+```
+# Iterate over batch of respiration files, calculate rates, append results to data frame:
+```{r}
+pb <- progress_bar$new(total = max(not.background$sample_id))
+
+for (i in not.background$sample_id) {
+  pb$tick()
+  if (!exists("metabolic.data"))
+  {
+    metabolic.data <- calc_metabolic_rate(i, metric)
+  } else {
+    metabolic.data <- rbind(metabolic.data, calc_metabolic_rate(i, metric))
+  }
+}
+```
+# Summarize and visualize results:
+```{r}
+# Aggregate mass-specific and volumetric rate by species, and habitat.
+# Calculate summary statistics.
+summary.metabolic.rate <- metabolic.data %>%
+  group_by(species, habitat) %>%
+  summarise(
+    n = n(),
+    avg_mass_specific_rate = mean(mass_specific_rate, na.rm = TRUE),
+    sd_mass_specific_rate = sd(mass_specific_rate, na.rm = TRUE),
+    avg_volumetric_rate = mean(volumetric_rate, na.rm = TRUE),
+    sd_volumetric_rate = sd(volumetric_rate, na.rm = TRUE)
+  ) %>%
+  mutate(
+    se_mass_specific_rate = sd_mass_specific_rate/sqrt(n),
+    se_volumetric_rate = sd_volumetric_rate/sqrt(n)
+  )
+
+summary.metabolic.rate
+
+# Visualize distribution of rate data.
+# Histogram mass-specific rate x species x habitat x site:
+p1 <- ggplot(metabolic.data, aes(mass_specific_rate)) +
+        geom_histogram(fill = "white", color = "grey30", bins = 25) +
+        facet_wrap(vars(species, habitat, site))
+
+p1
+# Boxplot mass-specific rate x species x habitat x site:
+p2 <- ggplot(metabolic.data) +
+        geom_boxplot(aes(x = habitat, y = mass_specific_rate, fill = habitat), color = "grey30") +
+        facet_wrap(vars(species, site)) +
+        xlab("") +
+        ylab("Oxygen consumption rate (mg O2/min/kg ash-free dry tissue mass)") +
+        ggtitle("Mass-Specific Metabolic Rate (MO2)") +
+        theme_pander()
+
+p2
+# Histogram volumetric rate x species x habitat x site:
+p3 <- ggplot(metabolic.data, aes(volumetric_rate)) +
+        geom_histogram(fill = "white", color = "grey30", bins = 25) +
+        facet_wrap(vars(species, habitat, site)) +
+        ggtitle("Volumetric Metabolic Rate (VO2)") +
+        theme_pander()
+
+p3
+# Boxplot volumetric rate x species x habitat x site:
+p4 <- ggplot(metabolic.data) +
+        geom_boxplot(aes(x = habitat, y = volumetric_rate, fill = habitat), color = "grey30") +
+        facet_wrap(vars(species, site)) +
+        ggtitle("Volumetric Metabolic Rate (VO2)") +
+        theme_pander()
+
+p4
+# Get red data
+red.metab <- metabolic.data %>%
+  filter(species == "Mesocentrotus franciscanus")
+
+# Get green data
+green.metab <- metabolic.data %>%
+  filter(species == "Strongylocentrotus droebachiensis")
+
+# Scatterplot oxygen consumption rate x volume x species x habitat:
+p5 <- ggplot(red.metab) +
+  geom_point(aes(x = displacement_volume_ml, y = 0-converted_rate)) +
+  # geom_point(aes(x = displacement_volume_ml, y = 0-converted_rate)) +
+  # geom_point(aes(x = spheroid_volume_ml, y = 0-converted_rate)) +
+  # geom_smooth(aes(x = spheroid_volume_ml, y = 0-converted_rate)) +
+  facet_wrap(vars(habitat)) +
+  xlab("Ash-free Dry Mass (mg)")
+  # xlab("Displacement volume (mL)") +
+  # xlab("Oblate spheroid test volume (mL)") +
+  ylab("Oxygen consumption rate mg O2/min/kg tissue") +
+  ggtitle("Mesocentrotus franciscanus") +
+  theme_tufte()
+
+p5
+
+p6 <- ggplot(green.metab) +
+  geom_point(aes(x = displacement_volume_ml, y = 0-converted_rate)) +
+  # geom_point(aes(x = spheroid_volume_ml, y = 0-converted_rate)) +
+  # geom_smooth(aes(x = spheroid_volume_ml, y = 0-converted_rate)) +
+  facet_wrap(vars(habitat)) +
+  xlab("Displacement volume (mL)") +
+  # xlab("Oblate spheroid test volume (mL)") +
+  ylab("Oxygen consumption rate mg O2/min/kg tissue") +
+  ggtitle("Strongylocentrotus droebachiensis") +
+  theme_tufte()
+
+p6
+
+# Visualize summary results.
+# Normalized by ash-free dry weight:
+summary.mass.specific.plot <- ggplot(data = summary.metabolic.rate) +
+  geom_bar(aes(x = habitat, y = avg_mass_specific_rate, fill = habitat), stat = "identity") +
+  facet_wrap(vars(species)) +
+  geom_errorbar(aes(x = habitat, ymin = avg_mass_specific_rate - se_mass_specific_rate, ymax = avg_mass_specific_rate + se_mass_specific_rate), width = 0.2) +
+  ggtitle("Ash-Free Dry Mass-Normalized Metabolic Rate (MO2)") +
+  ylab("Oxygen consumption rate (mg O2/min/kg tissue)") +
+  xlab("") +
+  theme_minimal()
+
+summary.mass.specific.plot
+
+# Volumetric:
+summary.volumetric.plot <- ggplot(data = summary.metabolic.rate) +
+  geom_bar(aes(x = habitat, y = avg_volumetric_rate, fill = habitat), stat = "identity") +
+  facet_wrap(vars(species)) +
+  geom_errorbar(aes(x = habitat, ymin = avg_volumetric_rate - se_volumetric_rate, ymax = avg_volumetric_rate + se_volumetric_rate), width = 0.2) +
+  ggtitle("Volumetric Metabolic Rate (VO2)") +
+  ylab("Oxygen consumption rate (mg O2/min/kg tissue)") +
+  xlab("") +
+  theme_minimal()
+
+summary.volumetric.plot
+```
+# Write data to xlsx file:
+```{r}
+library(writexl)
+# Whole animal ash-free dry weight-normalized metabolic rate data:
+write_xlsx(metabolic.data, path = "./Data/Calculations/whole_afdw_metabolic_rate.xlsx")
+```
