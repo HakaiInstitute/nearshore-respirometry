@@ -129,6 +129,17 @@ convrt_rate_S01_M3_002_light <- convert_rate(adj_rate_S01_M3_002_light,
                      mass = V01_M3_002$wet_weight_g/1000) 
 convrt_rate_S01_M3_002_light
 
+df_convrt_rate_S01_M3_002_light <- as.data.frame(convrt_rate_S01_M3_002_light$summary[1])
+df_convrt_rate_S01_M3_002_light$sampleID <- deparse(substitute(S01_M3_002))
+df_convrt_rate_S01_M3_002_light$treatment <- "light"
+
+
+df_convrt_rate_S01_M3_002_dark <- as.data.frame(convrt_rate_S01_M3_002_dark$summary[1])
+df_convrt_rate_S01_M3_002_dark$sampleID <- deparse(substitute(S01_M3_002))
+df_convrt_rate_S01_M3_002_dark$treatment <- "dark"
+
+df_convrt_rates <- rbind(df_convrt_rate_S01_M3_002_light, df_convrt_rate_S01_M3_002_dark)
+                            
 
 ################################################################
 ################# Function for bulk application ################
@@ -136,10 +147,10 @@ convrt_rate_S01_M3_002_light
 
 my_fun  <- function(file_name){
   
-  file <- read.csv(paste0("kelp_2020_resp_O2_files/", file_list[[1]]),
+  file <- read.csv(paste0("kelp_2020_resp_O2_files/", file_name[[1]]),
                     skip = 1,#ignore first row
                     header = TRUE)
-  
+
   #subsets, inspects and calculates O2 rate for sample chamber under dark condition 
   sample_dark <- file %>%
     subset(delta_t >5 & delta_t <30) %>% # trims first 5 minutes off the first 30 minutes of the run
@@ -151,26 +162,26 @@ my_fun  <- function(file_name){
     top_n(500, delta_t)%>%
     inspect(time = 7, oxygen = 9)%>%
     auto_rate()
-} 
+ 
   #converts results into a df
   df_dark <- as.data.frame(sample_dark$summary[1])
-  df_dark$sampleID <- deparse(substitute(file))
+  df_dark$sampleID <- paste(names(file_name[[1]]))#deparse(substitute(file_name[[1]]))
   df_dark$treatment <- "dark"
   
   df_light <- as.data.frame(sample_light$summary[1])
-  df_light$sampleID <- deparse(substitute(file))
+  df_light$sampleID <- paste(names(file_name[[1]]))
   df_light$treatment <- "light"
   
   df <- rbind(df_light, df_dark)
   
-  # do stuff
+# consider alternative function where 
+# bgs are calculated using calc_rate.bg instead of auto_rate...?
+  
 #  if(file$sample_type == "background"){
    # do backgroundstuff to give output
 #  } else {
     # do  otherstuff to give output
 #  }
-  
-#  #do more generic stuff
   
 #  return(output)
 }
@@ -179,11 +190,12 @@ metadata <- read_csv("metadata_OP.csv")
 
 file_list <- list.files("kelp_2020_resp_O2_files")
 
-
 dataframe <- ldply(file_list, my_fun)#%>%
   #left_join(metadata, by = sampleID)
 
-  str(dataframe)
+# subtract bgs from samples based on trial ID
+# convert based on sample and chamber volumes as well as sample weight
+
      
   
  
