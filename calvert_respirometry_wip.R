@@ -18,18 +18,18 @@ setwd("~/Repository/nearshore-respirometry")
 
 
 
-#Potential Framework
+#Framework
 
 #1. open csv for sample1 and corresponding bg csv
 
-#2. apply function1 : slices df in two 
+#2. slices df in two 
 # based on first 30 minutes, dark treatment (500 rows from the start) 
 # and the last 30 minutes, light treatment (500 rows from the end)
 
-#3. apply function2 : inspects all 4 chunks for errors
+#3. inspects all 4 chunks for errors
 #(sample1_dark, sample1_light, bg_dark, bg_light)
 
-#4. apply function3 : calculates rates for both treatment by 
+#4. calculate O2rates based on most linear segments by: 
 # a. calculating bg rate for dark, 
 # b. calculating bg rate for light,
 # c. calculating sample rate for dark,
@@ -37,13 +37,8 @@ setwd("~/Repository/nearshore-respirometry")
 # e. subtracts sample rate by bg rate for dark,
 # f. subtracts sample rate by bg rate for light
 
-#5. apply function4 : converts final rates for light and dark based on metadata volumes
-
-#6. create loop to autofill metadata dataframe with outputs....?
-
-
-
-
+#5. converts final rates for light and dark 
+# based on sample metadata volumes and weights
 
 ################################################################
 ################ Long version for troubleshooting ##############
@@ -94,20 +89,19 @@ rate_S01_M3_002_light
 
 rate_S01_C_dark <- calc_rate.bg(insp_S01_C_dark)
 rate_S01_C_dark
-#rate_S01_C_dark1 <- auto_rate(insp_S01_C_dark)
-#rate_S01_C_dark1
+rate_S01_C_dark1 <- auto_rate(insp_S01_C_dark)
+rate_S01_C_dark1
 ##### doesn't output same results....? extra step in the calc_rate.bg function...?
 
 rate_S01_C_light <- calc_rate.bg(insp_S01_C_light)
 rate_S01_C_light
-#rate_S01_C_light1 <- auto_rate(insp_S01_C_light)
-#rate_S01_C_light1
-##### same as above...
+rate_S01_C_light1 <- auto_rate(insp_S01_C_light)
+rate_S01_C_light1
 
 adj_rate_S01_M3_002_dark <- adjust_rate(rate_S01_M3_002_dark, rate_S01_C_dark) #subtraction
 adj_rate_S01_M3_002_dark
 adj_rate_S01_M3_002_light <- adjust_rate(rate_S01_M3_002_light, rate_S01_C_light)
-adj_rate_S01_M3_002_light
+adj_rate_S01_M3_002_light 
 
 ##5. 
 V01_M3_002 <- metadata %>%
@@ -129,12 +123,12 @@ convrt_rate_S01_M3_002_light <- convert_rate(adj_rate_S01_M3_002_light,
                      mass = V01_M3_002$wet_weight_g/1000) 
 convrt_rate_S01_M3_002_light
 
-df_convrt_rate_S01_M3_002_light <- as.data.frame(convrt_rate_S01_M3_002_light$summary[1])
+df_convrt_rate_S01_M3_002_light <- as.data.frame(convrt_rate_S01_M3_002_light$summary[2])
 df_convrt_rate_S01_M3_002_light$sampleID <- deparse(substitute(S01_M3_002))
 df_convrt_rate_S01_M3_002_light$treatment <- "light"
 
 
-df_convrt_rate_S01_M3_002_dark <- as.data.frame(convrt_rate_S01_M3_002_dark$summary[1])
+df_convrt_rate_S01_M3_002_dark <- as.data.frame(convrt_rate_S01_M3_002_dark$summary[2])
 df_convrt_rate_S01_M3_002_dark$sampleID <- deparse(substitute(S01_M3_002))
 df_convrt_rate_S01_M3_002_dark$treatment <- "dark"
 
@@ -165,11 +159,11 @@ my_fun  <- function(file_name){
  
   #converts results into a df
   df_dark <- as.data.frame(sample_dark$summary[1])
-  df_dark$sampleID <- paste(names(file_name[[1]]))#deparse(substitute(file_name[[1]]))
+  df_dark$sampleID <- gsub(".csv","",file_name) 
   df_dark$treatment <- "dark"
   
   df_light <- as.data.frame(sample_light$summary[1])
-  df_light$sampleID <- paste(names(file_name[[1]]))
+  df_light$sampleID <- gsub(".csv","",file_name)
   df_light$treatment <- "light"
   
   df <- rbind(df_light, df_dark)
@@ -182,7 +176,6 @@ my_fun  <- function(file_name){
 #  } else {
     # do  otherstuff to give output
 #  }
-  
 #  return(output)
 }
 
@@ -190,12 +183,35 @@ metadata <- read_csv("metadata_OP.csv")
 
 file_list <- list.files("kelp_2020_resp_O2_files")
 
-dataframe <- ldply(file_list, my_fun)#%>%
-  #left_join(metadata, by = sampleID)
+dataframe <- ldply(file_list, my_fun)%>%
+left_join(metadata, dataframe, by = "sampleID")
 
-# subtract bgs from samples based on trial ID
-# convert based on sample and chamber volumes as well as sample weight
 
-     
-  
+
+
+# subtract background signal from samples O2rates based on trial ID and treatment
+dataframe_bg <- dataframe %>%
+  select(rate_b1, sample_type, trialID, treatment) %>% 
+  subset(sample_type == "background") %>%
+  rename(rate_bg = rate_b1)
+dataframe_spl <- dataframe %>%
+  subset(sample_type == "sample") %>%
+  rename(rate_spl = rate_b1)
+data <- left_join(dataframe_spl, dataframe_bg, by = c("trialID", "treatment"))
+data$rate_adj <- data$rate_spl - data$rate_bg #seems backgrounds are very low!!!
+
+# converts rates of O2 based on sample and chamber volumes as well as sample weight
+data$rate_convrt <- data$rate_adj * 
+  ((data$volume_chamber - data$volume_kelp)/1000)*
+  (1/data$wet_weight_g)*
+  60
+  #convert_rate(data$rate_adj,
+  #                        o2.unit = "mg/L", 
+  #                        time.unit = "min", 
+  #                        output.unit = "mg/h/g", 
+  #                        volume = ((data$volume_chamber - data$volume_kelp)/1000),# in Liters,
+  #                        mass = data$wet_weight_g/1000)# in kg 
+data$rate_convrt_units <- "mg/h/g"    
+
+write.csv(data, "kelp_2020_data.csv")  
  
